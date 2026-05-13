@@ -78,8 +78,13 @@ def save_users(df: pd.DataFrame) -> None:
 
     # Tulis data
     if not df.empty:
-        values = df[headers].fillna("").values.tolist()
-        worksheet.append_rows(values)
+        # Pastikan semua kolom ada dan konversi ke string
+        for col in headers:
+            if col not in df.columns:
+                df[col] = ""
+        values = df[headers].fillna("").astype(str).values.tolist()
+        if values:
+            worksheet.append_rows(values)
 
 
 def get_user(username: str) -> dict | None:
@@ -186,8 +191,13 @@ def save_transactions(df: pd.DataFrame) -> None:
         # Normalkan kolom date ke format YYYY-MM-DD
         df = df.copy()
         df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-        values = df[headers].fillna("").values.tolist()
-        worksheet.append_rows(values)
+        # Pastikan semua kolom ada dan konversi ke string
+        for col in headers:
+            if col not in df.columns:
+                df[col] = ""
+        values = df[headers].fillna("").astype(str).values.tolist()
+        if values:  # Pastikan ada data sebelum append
+            worksheet.append_rows(values)
 
 
 def get_user_transactions(username: str) -> pd.DataFrame:

@@ -31,4 +31,4 @@ ENV/
 Thumbs.db
 
 # Streamlit
-.streamlit/secrets.toml
+.streamlit/secrets.toml.example
