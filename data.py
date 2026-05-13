@@ -86,6 +86,9 @@ def save_users(df: pd.DataFrame) -> None:
         if values:
             worksheet.append_rows(values)
 
+    # Clear cache agar data ter-refresh
+    _get_spreadsheet.clear()
+
 
 def get_user(username: str) -> dict | None:
     """Return dict user atau None jika tidak ditemukan."""
@@ -199,6 +202,9 @@ def save_transactions(df: pd.DataFrame) -> None:
         if values:  # Pastikan ada data sebelum append
             worksheet.append_rows(values)
 
+    # Clear cache agar data ter-refresh
+    _get_spreadsheet.clear()
+
 
 def get_user_transactions(username: str) -> pd.DataFrame:
     """Return semua transaksi milik username tertentu."""
@@ -244,6 +250,8 @@ def delete_transaction(txn_id: str) -> bool:
     if len(df) == before:
         return False
     save_transactions(df)
+    # Clear cache agar data ter-refresh
+    _get_spreadsheet.clear()
     return True
 
 

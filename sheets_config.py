@@ -4,6 +4,7 @@ sheets_config.py — Konfigurasi Google Sheets sebagai storage backend
 
 import os
 import json
+import time
 import streamlit as st
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -16,7 +17,41 @@ USERS_SHEET = "users"
 TRANSACTIONS_SHEET = "transactions"
 SESSIONS_SHEET = "sessions"
 
+# Retry configuration
+MAX_RETRIES = 3
+RETRY_DELAY = 1  # seconds
 
+
+def retry_on_api_error(func):
+    """Decorator untuk retry API calls yang gagal karena transient errors."""
+
+    def wrapper(*args, **kwargs):
+        last_error = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                return func(*args, **kwargs)
+            except gspread.exceptions.APIError as e:
+                last_error = e
+                error_msg = str(e)
+                # Retry hanya untuk transient errors
+                if any(
+                    code in error_msg for code in ["429", "500", "502", "503", "504"]
+                ):
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(RETRY_DELAY * (attempt + 1))
+                        continue
+                # Untuk error lain, langsung raise
+                raise
+            except Exception as e:
+                # Untuk non-API errors, langsung raise
+                raise
+        # Jika semua retry gagal
+        raise last_error
+
+    return wrapper
+
+
+@retry_on_api_error
 def get_gspread_client():
     """
     Buat dan return gspread client.
@@ -58,6 +93,7 @@ def get_gspread_client():
     return gspread.authorize(credentials)
 
 
+@retry_on_api_error
 def get_or_create_spreadsheet():
     """
     Buka spreadsheet, atau buat baru jika belum ada.
@@ -68,12 +104,12 @@ def get_or_create_spreadsheet():
     try:
         # Coba buka spreadsheet yang sudah ada
         spreadsheet = client.open(SPREADSHEET_NAME)
+        return spreadsheet
     except gspread.SpreadsheetNotFound:
         # Buat spreadsheet baru
         try:
             spreadsheet = client.create(SPREADSHEET_NAME)
-            # Share dengan email service account agar bisa diakses
-            # (opsional, tapi berguna untuk debugging via browser)
+            return spreadsheet
         except gspread.exceptions.APIError as e:
             raise Exception(
                 f"Gagal membuat spreadsheet '{SPREADSHEET_NAME}'.\n\n"
@@ -87,19 +123,39 @@ def get_or_create_spreadsheet():
                 f"Error detail: {str(e)}"
             )
     except gspread.exceptions.APIError as e:
-        raise Exception(
-            f"Error saat mengakses Google Sheets API.\n\n"
-            f"Kemungkinan penyebab:\n"
-            f"1. Google Sheets API belum diaktifkan\n"
-            f"2. Credentials tidak valid atau sudah expired\n"
-            f"3. Quota API sudah terlampaui\n"
-            f"4. Network/connectivity issues\n\n"
-            f"Error detail: {str(e)}"
-        )
+        # Jika error bukan karena not found, coba diagnosa
+        error_msg = str(e)
+        if "PERMISSION_DENIED" in error_msg or "403" in error_msg:
+            raise Exception(
+                f"Permission denied saat mengakses Google Sheets.\n\n"
+                f"Solusi:\n"
+                f"1. Pastikan Google Sheets API sudah diaktifkan\n"
+                f"2. Pastikan service account memiliki akses ke spreadsheet\n"
+                f"3. Share spreadsheet dengan: cashflow-service@cashflow-app-496214.iam.gserviceaccount.com\n\n"
+                f"Error detail: {error_msg}"
+            )
+        elif "UNAUTHENTICATED" in error_msg or "401" in error_msg:
+            raise Exception(
+                f"Authentication failed.\n\n"
+                f"Solusi:\n"
+                f"1. Periksa credentials di Streamlit Cloud secrets\n"
+                f"2. Pastikan service_account.json valid (untuk local)\n"
+                f"3. Pastikan private_key tidak corrupt\n\n"
+                f"Error detail: {error_msg}"
+            )
+        else:
+            raise Exception(
+                f"Error saat mengakses Google Sheets API.\n\n"
+                f"Kemungkinan penyebab:\n"
+                f"1. Google Sheets API belum diaktifkan\n"
+                f"2. Credentials tidak valid atau sudah expired\n"
+                f"3. Quota API sudah terlampaui\n"
+                f"4. Network/connectivity issues\n\n"
+                f"Error detail: {error_msg}"
+            )
 
-    return spreadsheet
 
-
+@retry_on_api_error
 def get_or_create_worksheet(spreadsheet, sheet_name: str, headers: list):
     """
     Buka worksheet, atau buat baru dengan headers jika belum ada.
