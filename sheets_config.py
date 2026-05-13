@@ -70,9 +70,32 @@ def get_or_create_spreadsheet():
         spreadsheet = client.open(SPREADSHEET_NAME)
     except gspread.SpreadsheetNotFound:
         # Buat spreadsheet baru
-        spreadsheet = client.create(SPREADSHEET_NAME)
-        # Share dengan email service account agar bisa diakses
-        # (opsional, tapi berguna untuk debugging via browser)
+        try:
+            spreadsheet = client.create(SPREADSHEET_NAME)
+            # Share dengan email service account agar bisa diakses
+            # (opsional, tapi berguna untuk debugging via browser)
+        except gspread.exceptions.APIError as e:
+            raise Exception(
+                f"Gagal membuat spreadsheet '{SPREADSHEET_NAME}'.\n\n"
+                f"Kemungkinan penyebab:\n"
+                f"1. Google Sheets API belum diaktifkan di Google Cloud Console\n"
+                f"   → Kunjungi: https://console.cloud.google.com/apis/library/sheets.googleapis.com\n"
+                f"2. Google Drive API belum diaktifkan\n"
+                f"   → Kunjungi: https://console.cloud.google.com/apis/library/drive.googleapis.com\n"
+                f"3. Service account tidak memiliki permission yang cukup\n"
+                f"4. Quota API sudah terlampaui\n\n"
+                f"Error detail: {str(e)}"
+            )
+    except gspread.exceptions.APIError as e:
+        raise Exception(
+            f"Error saat mengakses Google Sheets API.\n\n"
+            f"Kemungkinan penyebab:\n"
+            f"1. Google Sheets API belum diaktifkan\n"
+            f"2. Credentials tidak valid atau sudah expired\n"
+            f"3. Quota API sudah terlampaui\n"
+            f"4. Network/connectivity issues\n\n"
+            f"Error detail: {str(e)}"
+        )
 
     return spreadsheet
 
@@ -84,14 +107,35 @@ def get_or_create_worksheet(spreadsheet, sheet_name: str, headers: list):
     """
     try:
         worksheet = spreadsheet.worksheet(sheet_name)
-        # Cek apakah header sudah ada
-        existing_headers = worksheet.row_values(1)
-        if not existing_headers:
-            worksheet.append_row(headers)
+        # Cek apakah header sudah ada dengan error handling
+        try:
+            existing_headers = worksheet.row_values(1)
+            if not existing_headers:
+                worksheet.append_row(headers)
+        except gspread.exceptions.APIError as e:
+            # Jika error saat membaca, coba tulis header langsung
+            print(
+                f"Warning: Could not read headers from {sheet_name}, attempting to write: {e}"
+            )
+            try:
+                worksheet.append_row(headers)
+            except Exception as write_error:
+                print(f"Error writing headers to {sheet_name}: {write_error}")
+                raise
     except gspread.WorksheetNotFound:
         # Buat worksheet baru dengan headers
-        worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=20)
-        worksheet.append_row(headers)
+        try:
+            worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=20)
+            worksheet.append_row(headers)
+        except gspread.exceptions.APIError as e:
+            raise Exception(
+                f"Gagal membuat worksheet '{sheet_name}'. "
+                f"Pastikan:\n"
+                f"1. Google Sheets API sudah diaktifkan di Google Cloud Console\n"
+                f"2. Service account memiliki akses ke spreadsheet\n"
+                f"3. Quota API belum terlampaui\n"
+                f"Error detail: {str(e)}"
+            )
 
     return worksheet
 
