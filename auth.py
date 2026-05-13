@@ -1,16 +1,15 @@
 """
 auth.py — Autentikasi: login, register, ganti password, require_login
-         Session persistence via st.query_params + server-side token file
+         Session persistence via st.query_params + Google Sheets backend
 """
 
 import re
-import json
 import uuid
-import os
 from datetime import datetime, timedelta
 
 import streamlit as st
 import bcrypt
+import pandas as pd
 
 from data import (
     get_user,
@@ -19,83 +18,104 @@ from data import (
     get_all_usernames,
     count_users,
 )
+from sheets_config import (
+    get_or_create_spreadsheet,
+    get_or_create_worksheet,
+    SESSIONS_SHEET,
+)
 
 # ── Konstanta ──────────────────────────────────────────────────────────────
 MAX_USERS = 10
-SESSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions.json")
 SESSION_EXPIRY_DAYS = 7
-PARAM_KEY = "sid"  # nama query param di URL
+PARAM_KEY = "sid"
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# SERVER-SIDE SESSION STORE  (sessions.json)
+# SERVER-SIDE SESSION STORE (Google Sheets)
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def _load_sessions() -> dict:
-    if not os.path.exists(SESSION_FILE):
-        return {}
-    try:
-        with open(SESSION_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+@st.cache_resource
+def _get_spreadsheet():
+    return get_or_create_spreadsheet()
 
 
-def _save_sessions(sessions: dict) -> None:
-    with open(SESSION_FILE, "w") as f:
-        json.dump(sessions, f)
+def _load_sessions() -> pd.DataFrame:
+    spreadsheet = _get_spreadsheet()
+    worksheet = get_or_create_worksheet(
+        spreadsheet,
+        SESSIONS_SHEET,
+        ["token", "username", "display_name", "expires_at"],
+    )
+    data = worksheet.get_all_records()
+    if not data:
+        return pd.DataFrame(columns=["token", "username", "display_name", "expires_at"])
+    return pd.DataFrame(data)
 
 
-def _purge_expired(sessions: dict) -> dict:
-    """Hapus token yang sudah expired."""
+def _save_sessions(df: pd.DataFrame) -> None:
+    spreadsheet = _get_spreadsheet()
+    worksheet = spreadsheet.worksheet(SESSIONS_SHEET)
+    worksheet.clear()
+    headers = ["token", "username", "display_name", "expires_at"]
+    worksheet.append_row(headers)
+    if not df.empty:
+        values = df[headers].fillna("").values.tolist()
+        worksheet.append_rows(values)
+
+
+def _purge_expired(df: pd.DataFrame) -> pd.DataFrame:
     now = datetime.now().isoformat()
-    return {k: v for k, v in sessions.items() if v.get("expires_at", "") > now}
+    return df[df["expires_at"] > now]
 
 
 def create_session_token(username: str, display_name: str) -> str:
-    """Buat token baru, simpan ke sessions.json, return token string."""
-    sessions = _load_sessions()
-    sessions = _purge_expired(sessions)
-
+    df = _load_sessions()
+    df = _purge_expired(df)
     token = str(uuid.uuid4())
-    sessions[token] = {
-        "username": username,
-        "display_name": display_name,
-        "expires_at": (
-            datetime.now() + timedelta(days=SESSION_EXPIRY_DAYS)
-        ).isoformat(),
-    }
-    _save_sessions(sessions)
+
+    new_row = pd.DataFrame(
+        [
+            {
+                "token": token,
+                "username": username,
+                "display_name": display_name,
+                "expires_at": (
+                    datetime.now() + timedelta(days=SESSION_EXPIRY_DAYS)
+                ).isoformat(),
+            }
+        ]
+    )
+    df = pd.concat([df, new_row], ignore_index=True)
+    _save_sessions(df)
     return token
 
 
 def get_session_by_token(token: str) -> dict | None:
-    """Return session dict jika token valid dan belum expired, else None."""
     if not token:
         return None
-    sessions = _load_sessions()
-    session = sessions.get(token)
-    if not session:
+    df = _load_sessions()
+    session = df[df["token"] == token]
+    if session.empty:
         return None
-    if session.get("expires_at", "") < datetime.now().isoformat():
-        # Expired — hapus
-        del sessions[token]
-        _save_sessions(sessions)
+
+    session_dict = session.iloc[0].to_dict()
+    if session_dict.get("expires_at", "") < datetime.now().isoformat():
+        df = df[df["token"] != token]
+        _save_sessions(df)
         return None
-    # Verifikasi user masih ada
-    if get_user(session["username"]) is None:
+
+    if get_user(session_dict["username"]) is None:
         return None
-    return session
+    return session_dict
 
 
 def delete_session_token(token: str) -> None:
-    """Hapus token dari sessions.json."""
     if not token:
         return
-    sessions = _load_sessions()
-    sessions.pop(token, None)
-    _save_sessions(sessions)
+    df = _load_sessions()
+    df = df[df["token"] != token]
+    _save_sessions(df)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -104,17 +124,14 @@ def delete_session_token(token: str) -> None:
 
 
 def get_token_from_url() -> str:
-    """Baca token dari URL query param ?sid=..."""
     return st.query_params.get(PARAM_KEY, "")
 
 
 def set_token_in_url(token: str) -> None:
-    """Tulis token ke URL query param."""
     st.query_params[PARAM_KEY] = token
 
 
 def clear_token_from_url() -> None:
-    """Hapus token dari URL query param."""
     if PARAM_KEY in st.query_params:
         del st.query_params[PARAM_KEY]
 
@@ -139,11 +156,6 @@ def _init_session() -> None:
 
 
 def restore_session_from_token() -> bool:
-    """
-    Coba restore session dari URL token.
-    Return True jika berhasil, False jika tidak.
-    Dipanggil di awal app.py sebelum routing.
-    """
     _init_session()
     if st.session_state["logged_in"]:
         return True
@@ -161,19 +173,11 @@ def restore_session_from_token() -> bool:
 
 
 def require_login() -> None:
-    """
-    Cek apakah user sudah login.
-    Coba restore dari URL token dulu. Jika gagal → redirect login.
-    """
     _init_session()
     if st.session_state["logged_in"]:
         return
-
-    # Coba restore dari token di URL
     if restore_session_from_token():
         return
-
-    # Tidak ada session valid → ke login
     st.session_state["page"] = "login"
     st.rerun()
 
@@ -237,14 +241,12 @@ def render_login_page() -> None:
                 user = get_user(selected_user)
                 token = create_session_token(selected_user, user["display_name"])
 
-                # Simpan ke session state
                 st.session_state["logged_in"] = True
                 st.session_state["username"] = selected_user
                 st.session_state["display_name"] = user["display_name"]
                 st.session_state["page"] = "dashboard"
                 st.session_state["fail_count"] = 0
 
-                # Simpan token ke URL — synchronous, langsung efektif
                 set_token_in_url(token)
                 st.rerun()
             else:

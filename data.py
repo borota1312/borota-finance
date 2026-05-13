@@ -1,38 +1,20 @@
 """
-data.py — Semua fungsi baca/tulis CSV (single responsibility)
-Menangani: users.csv, transactions.csv, file lock.
-
-File CSV dibuat otomatis saat pertama kali data disimpan —
-tidak ada seed/dummy data. users.csv terbentuk saat register pertama,
-transactions.csv terbentuk saat transaksi pertama disimpan.
+data.py — Semua fungsi baca/tulis data (Google Sheets backend)
+Menangani: users, transactions
 """
 
-import os
 import uuid
-import fcntl
-import tempfile
-import shutil
 from datetime import datetime, date
 
 import pandas as pd
+import streamlit as st
 
-# ── Path file ──────────────────────────────────────────────────────────────
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-USERS_CSV = os.path.join(BASE_DIR, "users.csv")
-TRANSACTIONS_CSV = os.path.join(BASE_DIR, "transactions.csv")
-
-# ── Kolom CSV ──────────────────────────────────────────────────────────────
-USER_COLS = ["username", "password_hash", "display_name", "created_at"]
-TXN_COLS = [
-    "id",
-    "username",
-    "date",
-    "type",
-    "category",
-    "amount",
-    "note",
-    "created_at",
-]
+from sheets_config import (
+    get_or_create_spreadsheet,
+    get_or_create_worksheet,
+    USERS_SHEET,
+    TRANSACTIONS_SHEET,
+)
 
 # ── Kategori ───────────────────────────────────────────────────────────────
 INCOME_CATEGORIES = ["Gaji", "Freelance", "Bisnis", "Investasi", "Lainnya"]
@@ -49,24 +31,14 @@ EXPENSE_CATEGORIES = [
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# HELPER: File-safe write (tmp-rename trick + fcntl lock)
+# CACHE SPREADSHEET CONNECTION
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def _safe_write_csv(df: pd.DataFrame, filepath: str, columns: list) -> None:
-    """Tulis DataFrame ke CSV secara aman menggunakan tmp-rename trick."""
-    dir_name = os.path.dirname(filepath)
-    tmp_fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
-    try:
-        with os.fdopen(tmp_fd, "w") as tmp_file:
-            fcntl.flock(tmp_file, fcntl.LOCK_EX)
-            df[columns].to_csv(tmp_file, index=False)
-            fcntl.flock(tmp_file, fcntl.LOCK_UN)
-        shutil.move(tmp_path, filepath)
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        raise
+@st.cache_resource
+def _get_spreadsheet():
+    """Cache spreadsheet connection untuk performa."""
+    return get_or_create_spreadsheet()
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -75,19 +47,39 @@ def _safe_write_csv(df: pd.DataFrame, filepath: str, columns: list) -> None:
 
 
 def load_users() -> pd.DataFrame:
-    """Baca users.csv. Return DataFrame kosong jika file belum ada."""
-    if not os.path.exists(USERS_CSV):
-        return pd.DataFrame(columns=USER_COLS)
-    df = pd.read_csv(USERS_CSV, dtype=str)
-    for col in USER_COLS:
-        if col not in df.columns:
-            df[col] = ""
-    return df[USER_COLS]
+    """Baca users dari Google Sheets. Return DataFrame."""
+    spreadsheet = _get_spreadsheet()
+    worksheet = get_or_create_worksheet(
+        spreadsheet,
+        USERS_SHEET,
+        ["username", "password_hash", "display_name", "created_at"],
+    )
+
+    data = worksheet.get_all_records()
+    if not data:
+        return pd.DataFrame(
+            columns=["username", "password_hash", "display_name", "created_at"]
+        )
+
+    return pd.DataFrame(data)
 
 
 def save_users(df: pd.DataFrame) -> None:
-    """Tulis DataFrame users ke CSV. File dibuat otomatis jika belum ada."""
-    _safe_write_csv(df, USERS_CSV, USER_COLS)
+    """Tulis DataFrame users ke Google Sheets."""
+    spreadsheet = _get_spreadsheet()
+    worksheet = spreadsheet.worksheet(USERS_SHEET)
+
+    # Clear semua data kecuali header
+    worksheet.clear()
+
+    # Tulis header
+    headers = ["username", "password_hash", "display_name", "created_at"]
+    worksheet.append_row(headers)
+
+    # Tulis data
+    if not df.empty:
+        values = df[headers].fillna("").values.tolist()
+        worksheet.append_rows(values)
 
 
 def get_user(username: str) -> dict | None:
@@ -100,10 +92,7 @@ def get_user(username: str) -> dict | None:
 
 
 def add_user(username: str, password_hash: str, display_name: str) -> None:
-    """
-    Tambah user baru ke users.csv.
-    Jika users.csv belum ada, file dibuat otomatis saat save_users dipanggil.
-    """
+    """Tambah user baru ke Google Sheets."""
     df = load_users()
     new_row = pd.DataFrame(
         [
@@ -120,7 +109,7 @@ def add_user(username: str, password_hash: str, display_name: str) -> None:
 
 
 def update_user_password(username: str, new_hash: str) -> None:
-    """Update password_hash user di users.csv."""
+    """Update password_hash user di Google Sheets."""
     df = load_users()
     df.loc[df["username"] == username, "password_hash"] = new_hash
     save_users(df)
@@ -142,24 +131,63 @@ def count_users() -> int:
 
 
 def load_transactions() -> pd.DataFrame:
-    """Baca transactions.csv. Return DataFrame kosong jika file belum ada."""
-    if not os.path.exists(TRANSACTIONS_CSV):
-        return pd.DataFrame(columns=TXN_COLS)
-    df = pd.read_csv(TRANSACTIONS_CSV, dtype=str)
-    for col in TXN_COLS:
-        if col not in df.columns:
-            df[col] = ""
+    """Baca transactions dari Google Sheets. Return DataFrame."""
+    spreadsheet = _get_spreadsheet()
+    worksheet = get_or_create_worksheet(
+        spreadsheet,
+        TRANSACTIONS_SHEET,
+        ["id", "username", "date", "type", "category", "amount", "note", "created_at"],
+    )
+
+    data = worksheet.get_all_records()
+    if not data:
+        return pd.DataFrame(
+            columns=[
+                "id",
+                "username",
+                "date",
+                "type",
+                "category",
+                "amount",
+                "note",
+                "created_at",
+            ]
+        )
+
+    df = pd.DataFrame(data)
     df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    return df[TXN_COLS]
+    return df
 
 
 def save_transactions(df: pd.DataFrame) -> None:
-    """Tulis DataFrame transaksi ke CSV. File dibuat otomatis jika belum ada."""
-    # Normalkan kolom date ke format YYYY-MM-DD sebelum simpan
-    df = df.copy()
-    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    _safe_write_csv(df, TRANSACTIONS_CSV, TXN_COLS)
+    """Tulis DataFrame transaksi ke Google Sheets."""
+    spreadsheet = _get_spreadsheet()
+    worksheet = spreadsheet.worksheet(TRANSACTIONS_SHEET)
+
+    # Clear semua data kecuali header
+    worksheet.clear()
+
+    # Tulis header
+    headers = [
+        "id",
+        "username",
+        "date",
+        "type",
+        "category",
+        "amount",
+        "note",
+        "created_at",
+    ]
+    worksheet.append_row(headers)
+
+    # Tulis data
+    if not df.empty:
+        # Normalkan kolom date ke format YYYY-MM-DD
+        df = df.copy()
+        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        values = df[headers].fillna("").values.tolist()
+        worksheet.append_rows(values)
 
 
 def get_user_transactions(username: str) -> pd.DataFrame:
@@ -176,10 +204,7 @@ def add_transaction(
     amount: float,
     note: str,
 ) -> str:
-    """
-    Tambah transaksi baru. Return id transaksi.
-    Jika transactions.csv belum ada, file dibuat otomatis saat save_transactions dipanggil.
-    """
+    """Tambah transaksi baru. Return id transaksi."""
     df = load_transactions()
     txn_id = str(uuid.uuid4())
     new_row = pd.DataFrame(
@@ -213,14 +238,12 @@ def delete_transaction(txn_id: str) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# INITIALIZE — no-op, dipertahankan agar app.py tidak error
+# INITIALIZE
 # ══════════════════════════════════════════════════════════════════════════
 
 
 def initialize_data() -> None:
-    """
-    Tidak melakukan apa-apa.
-    CSV dibuat otomatis oleh add_user() dan add_transaction()
-    saat data pertama kali disimpan.
-    """
-    pass
+    """Inisialisasi Google Sheets worksheets."""
+    from sheets_config import init_sheets
+
+    init_sheets()
