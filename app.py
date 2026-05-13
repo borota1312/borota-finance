@@ -49,7 +49,23 @@ from dashboard import (
 # INISIALISASI
 # ══════════════════════════════════════════════════════════════════════════
 
-initialize_data()
+# Initialize data hanya sekali per session untuk menghindari quota exceeded
+if "data_initialized" not in st.session_state:
+    try:
+        initialize_data()
+        st.session_state["data_initialized"] = True
+    except Exception as e:
+        # Jika quota exceeded, tampilkan pesan yang lebih user-friendly
+        if "429" in str(e) or "Quota exceeded" in str(e):
+            st.error(
+                "⚠️ **Google Sheets API Quota Exceeded**\n\n"
+                "Aplikasi sedang mengalami traffic tinggi. "
+                "Silakan tunggu 1-2 menit dan refresh halaman.\n\n"
+                "Jika masalah berlanjut, hubungi administrator."
+            )
+            st.stop()
+        else:
+            raise
 
 # Inisialisasi session state defaults
 _defaults = {

@@ -33,12 +33,17 @@ def retry_on_api_error(func):
             except gspread.exceptions.APIError as e:
                 last_error = e
                 error_msg = str(e)
-                # Retry hanya untuk transient errors
-                if any(
-                    code in error_msg for code in ["429", "500", "502", "503", "504"]
-                ):
+
+                # Untuk quota exceeded (429), JANGAN retry - langsung raise
+                if "429" in error_msg or "Quota exceeded" in error_msg:
+                    raise
+
+                # Retry hanya untuk transient errors lainnya (500, 502, 503, 504)
+                if any(code in error_msg for code in ["500", "502", "503", "504"]):
                     if attempt < MAX_RETRIES - 1:
-                        time.sleep(RETRY_DELAY * (attempt + 1))
+                        # Exponential backoff: 2s, 4s, 8s
+                        wait_time = RETRY_DELAY * (2**attempt)
+                        time.sleep(wait_time)
                         continue
                 # Untuk error lain, langsung raise
                 raise
@@ -200,26 +205,55 @@ def init_sheets():
     """
     Inisialisasi semua worksheets yang dibutuhkan.
     Dipanggil sekali di awal app.py.
+    Optimized untuk menghindari quota exceeded.
     """
-    spreadsheet = get_or_create_spreadsheet()
+    try:
+        spreadsheet = get_or_create_spreadsheet()
 
-    # Users sheet
-    get_or_create_worksheet(
-        spreadsheet,
-        USERS_SHEET,
-        ["username", "password_hash", "display_name", "created_at"],
-    )
+        # Dapatkan semua worksheet yang ada sekaligus untuk mengurangi API calls
+        try:
+            existing_worksheets = {ws.title: ws for ws in spreadsheet.worksheets()}
+        except Exception:
+            existing_worksheets = {}
 
-    # Transactions sheet
-    get_or_create_worksheet(
-        spreadsheet,
-        TRANSACTIONS_SHEET,
-        ["id", "username", "date", "type", "category", "amount", "note", "created_at"],
-    )
+        # Users sheet
+        if USERS_SHEET not in existing_worksheets:
+            get_or_create_worksheet(
+                spreadsheet,
+                USERS_SHEET,
+                ["username", "password_hash", "display_name", "created_at"],
+            )
 
-    # Sessions sheet
-    get_or_create_worksheet(
-        spreadsheet,
-        SESSIONS_SHEET,
-        ["token", "username", "display_name", "expires_at"],
-    )
+        # Transactions sheet
+        if TRANSACTIONS_SHEET not in existing_worksheets:
+            get_or_create_worksheet(
+                spreadsheet,
+                TRANSACTIONS_SHEET,
+                [
+                    "id",
+                    "username",
+                    "date",
+                    "type",
+                    "category",
+                    "amount",
+                    "note",
+                    "created_at",
+                ],
+            )
+
+        # Sessions sheet
+        if SESSIONS_SHEET not in existing_worksheets:
+            get_or_create_worksheet(
+                spreadsheet,
+                SESSIONS_SHEET,
+                ["token", "username", "display_name", "expires_at"],
+            )
+    except gspread.exceptions.APIError as e:
+        error_msg = str(e)
+        if "429" in error_msg or "Quota exceeded" in error_msg:
+            # Jangan raise exception, biarkan app tetap jalan dengan cache
+            print(
+                f"Warning: Quota exceeded during init_sheets, will retry later: {error_msg}"
+            )
+            return
+        raise
